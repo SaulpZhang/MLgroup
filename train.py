@@ -1,21 +1,29 @@
-import argparse
-import torch
+import os
+import random
+import json
 import yaml
-
+import torch
 from datasets import load_dataset
-from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
-
-
-def arg_parser():
-    parser = argparse.ArgumentParser(description='Training script')
-    parser.add_argument('--continue', type=bool, required=True, help='Number of training epochs')
-    return parser
-
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    TrainingArguments,
+    Trainer,
+)
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from typing import Optional
 
 def load_yaml(file_path):
     with open(file_path, 'r') as file:
         config = yaml.safe_load(file)
     return config
+
+
+def set_seed(seed: int):
+    random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 def load_model_and_tokenizer(model_name, trust_remote_code=True, device="auto"):
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust_remote_code, use_fast=False)
@@ -62,13 +70,90 @@ def load_dataset_from_config(cfg):
     # 过滤空样本
     ds = ds.filter(lambda x: x["src_text"] is not None and x["src_text"] != "" and x["tgt_text"] is not None and x["tgt_text"] != "")
 
-    # 限制样本数（可选）
-    if max_examples is not None:
-        n = min(len(ds), int(max_examples))
-        ds = ds.select(range(n))
-
     return ds
 
+def apply_peft_lora(model, cfg):
+    lora_cfg = cfg.get("lora", None)
+
+    if lora_cfg:
+        peft_config = LoraConfig(
+            r=lora_cfg.get("r", 16),
+            lora_alpha=lora_cfg.get("alpha", 32),
+            target_modules=lora_cfg.get("target_modules", ["q_proj", "v_proj"]),
+            lora_dropout=lora_cfg.get("dropout", 0.05),
+            bias=lora_cfg.get("bias", "none"),
+            task_type=lora_cfg.get("task_type", "CAUSAL_LM"),
+        )
+        model = get_peft_model(model, peft_config)
+        model.print_trainable_parameters()
+    # ensure caching disabled for training with Trainer
+    if hasattr(model, "config"):
+        model.config.use_cache = False
+    return model
+
+def prepare_decoder_map_fn(cfg, tokenizer):
+    template = cfg.get("prompt", {}).get("template", "{text}")
+    max_length = cfg.get("tokenization", {}).get("max_length", 1024)
+
+    def _map_batch(batch):
+        input_ids = []
+        attention_mask = []
+        labels = []
+        srcs = batch["src_text"]
+        tgts = batch["tgt_text"]
+        for src, tgt in zip(srcs, tgts):
+            prompt = template.format(src_lang=cfg.get("src_lang", {}).get("src_lang", ""), tgt_lang=cfg.get("tgt_lang", {}).get("tgt_lang", ""), text=src)
+            full = prompt + " " + tgt
+            tok_full = tokenizer(full, truncation=True, max_length=max_length, padding=False)
+            tok_prompt = tokenizer(prompt, truncation=True, max_length=max_length, padding=False)
+            lbls = tok_full["input_ids"].copy()
+            prompt_len = len(tok_prompt["input_ids"])
+            if prompt_len > 0:
+                lbls[:prompt_len] = [-100] * prompt_len
+            input_ids.append(tok_full["input_ids"])
+            attention_mask.append(tok_full.get("attention_mask", [1] * len(tok_full["input_ids"])))
+            labels.append(lbls)
+        return {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
+    return _map_batch
+
+def train_from_ds(cfg, tokenizer, model, ds):
+    set_seed(cfg.get("train", {}).get("seed", 42))
+    model = apply_peft_lora(model, cfg)
+
+    map_fn = prepare_decoder_map_fn(cfg, tokenizer)
+    tokenized = ds.map(map_fn, batched=True, remove_columns=ds.column_names)
+
+    train_cfg = cfg.get("train", cfg.get("training", {}))
+    output_dir = train_cfg.get("output_dir", "outputs/lora")
+    os.makedirs(output_dir, exist_ok=True)
+
+    training_args = TrainingArguments(
+        output_dir=output_dir,
+        per_device_train_batch_size=train_cfg.get("per_device_train_batch_size", train_cfg.get("batch_size", 4)),
+        gradient_accumulation_steps=train_cfg.get("gradient_accumulation_steps", 1),
+        num_train_epochs=train_cfg.get("epochs", train_cfg.get("num_train_epochs", 1)),
+        learning_rate=train_cfg.get("learning_rate", train_cfg.get("lr", 2e-5)),
+        weight_decay=train_cfg.get("weight_decay", 0.0),
+        logging_steps=train_cfg.get("logging_steps", 100),
+        save_steps=train_cfg.get("save_steps", None),
+        eval_strategy=train_cfg.get("eval_strategy", "no"),
+        eval_steps=train_cfg.get("eval_steps", None),
+        remove_unused_columns=False,
+    )
+
+    data_collator = lambda features: tokenizer.pad(features, padding="longest", return_tensors="pt")
+
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=tokenized,
+        data_collator=data_collator,
+    )
+
+    trainer.train()
+    # 保存 LoRA 权重与 tokenizer
+    model.save_pretrained(output_dir)
+    tokenizer.save_pretrained(output_dir)
 
 if __name__ == '__main__':
     # parser = arg_parser()
@@ -77,3 +162,4 @@ if __name__ == '__main__':
     config = load_yaml('config.yaml')
     ds = load_dataset_from_config(config)
     tokenizer, model = load_model_and_tokenizer(config['model']['name'])
+    train_from_ds(config, tokenizer, model, ds)
