@@ -122,7 +122,7 @@ def train_from_ds(cfg, tokenizer, model, ds):
     model = apply_peft_lora(model, cfg)
 
     map_fn = prepare_decoder_map_fn(cfg, tokenizer)
-    tokenized = ds.map(map_fn, batched=True, remove_columns=ds.column_names)
+    tokenized = ds.map(map_fn, batched=True)
 
     train_cfg = cfg.get("train", cfg.get("training", {}))
     output_dir = train_cfg.get("output_dir", "outputs/lora")
