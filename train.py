@@ -25,14 +25,15 @@ def set_seed(seed: int):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-def load_model_and_tokenizer(model_name, trust_remote_code=True, device="auto"):
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust_remote_code, use_fast=False)
+def load_model_and_tokenizer(cfg, model_name, trust_remote_code=True, device="auto"):
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=trust_remote_code, use_fast=False, cache_dir =cfg.get("model", {}).get("cache_dir", None))
     # For Qwen-like models, AutoModelForCausalLM often works; adjust if model requires custom class.
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         trust_remote_code=trust_remote_code,
         torch_dtype=torch.float16 if device == "cuda" else torch.float32,
         device_map="auto" if device == "cuda" else None,
+        cache_dir=cfg.get("model", {}).get("cache_dir", None),
     )
     return tokenizer, model
 
