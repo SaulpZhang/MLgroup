@@ -1,0 +1,41 @@
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules:
+    - "q_proj"
+    - "v_proj"
+  task_type: "CAUSAL_LM"
+  
+
+train:
+  output_dir: "../root/autodl-fs/qwen_checkpoint"
+  epochs: 3
+  learning_rate: 1e-5
+  weight_decay: 0.01
+  warmup_steps: 100
+  logging_steps: 100
+  save_steps: 200
+  eval_strategy: "steps"
+  eval_steps: 200
+
+
+
+model:
+  name: "Qwen/Qwen2.5-7B-Instruct"
+  cache_dir: "../root/autodl-fs/model"
+
+dataset:
+  name: "wmt14"
+  pair: "de-en"
+  max_examples: None
+  cache_dir: "../root/autodl-fs/datasets"
+  src_lang: "de"
+  tgt_lang: "en"
+
+prompt:
+  template: "请将下列{src_lang}翻译为{tgt_lang}。直接回答结果，不需要解释任何事情。:\n\n {text}"
+  src_lang: "German"
+  tgt_lang: "English"
+
+
