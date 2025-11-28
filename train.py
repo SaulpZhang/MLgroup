@@ -162,5 +162,5 @@ if __name__ == '__main__':
 
     config = load_yaml('config.yaml')
     ds = load_dataset_from_config(config)
-    tokenizer, model = load_model_and_tokenizer(config['model']['name'])
+    tokenizer, model = load_model_and_tokenizer(config, config['model']['name'])
     train_from_ds(config, tokenizer, model, ds)
